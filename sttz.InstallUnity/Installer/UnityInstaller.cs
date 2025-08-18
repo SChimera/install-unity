@@ -6,7 +6,6 @@ using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
-
 using static sttz.InstallUnity.UnityReleaseAPIClient;
 
 namespace sttz.InstallUnity
@@ -222,6 +221,9 @@ public class UnityInstaller
         if (System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.OSX)) {
             Logger.LogDebug("Loading platform integration for macOS");
             Platform = new MacPlatform();
+        } else if (System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Linux)) {
+            Logger.LogDebug("Loading platform integration for Linux");
+            Platform = new LinuxPlatform();
         } else {
             throw new NotImplementedException("Installer does not currently support the platform: " + System.Runtime.InteropServices.RuntimeInformation.OSDescription);
         }
@@ -580,6 +582,8 @@ public class UnityInstaller
             string installationPaths = null;
             if (System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.OSX)) {
                 installationPaths = Configuration.installPathMac;
+            } else if (System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Linux)) {
+                installationPaths = Configuration.installPathLinux;
             } else {
                 throw new NotImplementedException("Installer does not currently support the platform: " + System.Runtime.InteropServices.RuntimeInformation.OSDescription);
             }

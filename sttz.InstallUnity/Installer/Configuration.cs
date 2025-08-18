@@ -66,6 +66,12 @@ public class Configuration
         + "/Applications/Unity {major}.{minor}.{patch}{type}{build};"
         + "/Applications/Unity {major}.{minor}.{patch}{type}{build} ({hash})";
 
+    [Description("Linux installation paths, separated by ; (first non-existing will be used, variables: {major} {minor} {patch} {type} {build} {hash}).")]
+    public string installPathLinux = 
+          "/opt/Unity {major}.{minor};"
+        + "/opt/Unity {major}.{minor}.{patch}{type}{build};"
+        + "/opt/Unity {major}.{minor}.{patch}{type}{build} ({hash})";
+
     // -------- Serialization --------
 
     /// <summary>
