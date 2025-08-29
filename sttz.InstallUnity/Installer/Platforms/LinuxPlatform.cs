@@ -623,20 +623,43 @@ namespace sttz.InstallUnity
                 var targetDir = destination.Replace("{UNITY_PATH}", INSTALL_PATH);
 
                 // Extract the Payload (cpio archive)
-                // Use shell to handle the redirection properly
-                var cpioCommand = $"cpio --extract --make-directories --preserve-modification-time < \"{payloadPath}\"";
-
                 var retryWithRoot = false;
                 try
                 {
                     Directory.CreateDirectory(targetDir);
 
-                    // Use sh -c to handle the redirection
-                    var result = await Command.Run("/bin/sh", $"-c 'cd \"{targetDir}\" && {cpioCommand}'",
-                        cancellation: cancellation);
-                    if (result.exitCode != 0)
+                    // Use cpio directly with stdin redirection instead of shell
+                    // This avoids shell quoting issues
+                    var cpioProcess = new System.Diagnostics.Process
                     {
-                        throw new($"ERROR: {result.error}");
+                        StartInfo = new()
+                        {
+                            FileName = "/usr/bin/cpio",
+                            Arguments = "--extract --make-directories --preserve-modification-time --quiet",
+                            WorkingDirectory = targetDir,
+                            RedirectStandardInput = true,
+                            RedirectStandardOutput = true,
+                            RedirectStandardError = true,
+                            UseShellExecute = false,
+                        },
+                    };
+
+                    cpioProcess.Start();
+
+                    // Feed the payload file to cpio's stdin
+                    using (var payloadStream = File.OpenRead(payloadPath))
+                    {
+                        await payloadStream.CopyToAsync(cpioProcess.StandardInput.BaseStream, cancellation);
+                    }
+
+                    cpioProcess.StandardInput.Close();
+
+                    await cpioProcess.WaitForExitAsync(cancellation);
+
+                    if (cpioProcess.ExitCode != 0)
+                    {
+                        var error = await cpioProcess.StandardError.ReadToEndAsync();
+                        throw new($"cpio extraction failed: {error}");
                     }
                 }
                 catch (Exception e)
@@ -653,8 +676,24 @@ namespace sttz.InstallUnity
                         throw new($"ERROR: {result.error}");
                     }
 
-                    // Use sudo sh -c for the entire command including redirection
-                    result = await Sudo("/bin/sh", $"-c 'cd \"{targetDir}\" && {cpioCommand}'", cancellation);
+                    // For sudo, we need to use a different approach
+                    // Create a script file to avoid shell quoting issues
+                    var scriptPath = Path.Combine(tmpDir, "extract.sh");
+                    var scriptContent = $@"#!/bin/bash
+cd '{targetDir.Replace("'", "'\\''")}'
+cpio --extract --make-directories --preserve-modification-time --quiet < '{payloadPath.Replace("'", "'\\''")}'
+";
+                    await File.WriteAllTextAsync(scriptPath, scriptContent, cancellation);
+
+                    // Make script executable
+                    result = await Command.Run("/bin/chmod", $"+x \"{scriptPath}\"", cancellation: cancellation);
+                    if (result.exitCode != 0)
+                    {
+                        throw new($"Failed to make script executable: {result.error}");
+                    }
+
+                    // Execute the script with sudo
+                    result = await Sudo("/bin/bash", $"\"{scriptPath}\"", cancellation);
                     if (result.exitCode != 0)
                     {
                         throw new($"ERROR: {result.error}");
