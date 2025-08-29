@@ -563,6 +563,7 @@ namespace sttz.InstallUnity
                 tmpDir = Path.Combine(Path.GetTempPath(), UnityInstaller.PRODUCT_NAME,
                     Path.GetFileNameWithoutExtension(filePath));
                 Directory.CreateDirectory(tmpDir);
+
                 if (use7Z)
                 {
                     var result = await Command.Run("/usr/bin/7z", $"x \"{filePath}\" -o\"{tmpDir}\" -y",
@@ -579,25 +580,24 @@ namespace sttz.InstallUnity
                     }
                 }
 
-                // When using 7z, look for Payload files directly instead of .pkg.tmp directories
                 string payloadPath = null;
                 if (use7Z)
                 {
-                    // 7z extracts flat structure, look for Payload file directly
-                    var payloadFiles = Directory.GetFiles(tmpDir, "Payload", SearchOption.AllDirectories);
-                    if (payloadFiles.Length == 0)
+                    // 7z extracts .pkg files with a Payload~ file (note the tilde)
+                    payloadPath = Path.Combine(tmpDir, "Payload~");
+                    if (!File.Exists(payloadPath))
                     {
-                        throw new($"Could not find Payload file when unpacking pkg '{filePath}' with 7z");
+                        // Try without tilde as fallback
+                        payloadPath = Path.Combine(tmpDir, "Payload");
+                        if (!File.Exists(payloadPath))
+                        {
+                            // List what was actually extracted for debugging
+                            var extractedFiles = Directory.GetFiles(tmpDir, "*", SearchOption.TopDirectoryOnly);
+                            _logger.LogError(
+                                $"Could not find Payload file. Found files: {string.Join(", ", extractedFiles.Select(Path.GetFileName))}");
+                            throw new($"Could not find Payload file when unpacking pkg '{filePath}' with 7z");
+                        }
                     }
-
-                    if (payloadFiles.Length > 1)
-                    {
-                        // Try to find the main one (usually the largest or in a specific pattern)
-                        // For now, just take the first one
-                        _logger.LogWarning($"Found multiple Payload files, using first: {payloadFiles[0]}");
-                    }
-
-                    payloadPath = payloadFiles[0];
                 }
                 else
                 {
@@ -665,7 +665,15 @@ namespace sttz.InstallUnity
             {
                 if (tmpDir != null && Directory.Exists(tmpDir))
                 {
-                    Directory.Delete(tmpDir, true);
+                    try
+                    {
+                        Directory.Delete(tmpDir, true);
+                    }
+                    catch
+                    {
+                        // If regular delete fails, try with sudo
+                        await Delete(tmpDir, cancellation);
+                    }
                 }
             }
         }
