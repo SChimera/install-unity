@@ -548,24 +548,33 @@ namespace sttz.InstallUnity
         async Task UnpackPkg(string filePath, string destination, CancellationToken cancellation = default)
         {
             // Check if xar is installed
-            if (!File.Exists("/usr/bin/xar"))
+            if(!File.Exists("/usr/bin/xar") && !File.Exists("/usr/bin/7z"))
             {
-                throw new InvalidOperationException(
-                    "The 'xar' utility is required to install .pkg packages but is not installed.\n" +
-                    "Please install it using your package manager (e.g., 'sudo apt install xar' on Debian/Ubuntu).");
+                throw new InvalidOperationException("Cannot unpack .pkg files: 'xar' or '7z' not found. Please install 'xar' or '7z' package.");
             }
+            // figure out which tool to use
+            var use7Z = File.Exists("/usr/bin/7z") && !File.Exists("/usr/bin/xar");
+            
             string tmpDir = null;
             try
             {
                 tmpDir = Path.Combine(Path.GetTempPath(), UnityInstaller.PRODUCT_NAME,
                     Path.GetFileNameWithoutExtension(filePath));
                 Directory.CreateDirectory(tmpDir);
-
-                var result = await Command.Run("/usr/bin/xar", $"-xf \"{filePath}\" -C \"{tmpDir}\"",
-                    cancellation: cancellation);
-                if (result.exitCode != 0)
+                if (use7Z)
                 {
-                    throw new($"ERROR: {result.error}");
+                    var result = await Command.Run("/usr/bin/7z", $"x \"{filePath}\" -o\"{tmpDir}\" -y",
+                        cancellation: cancellation);
+                    if (result.exitCode != 0) throw new Exception($"ERROR: {result.error}");
+                }
+                else
+                {
+                    var result = await Command.Run("/usr/bin/xar", $"-xf \"{filePath}\" -C \"{tmpDir}\"",
+                        cancellation: cancellation);
+                    if (result.exitCode != 0)
+                    {
+                        throw new($"ERROR: {result.error}");
+                    }
                 }
 
                 var pkgs = Directory.GetDirectories(tmpDir, "*.pkg.tmp");
@@ -586,15 +595,15 @@ namespace sttz.InstallUnity
 
                 var targetDir = destination.Replace("{UNITY_PATH}", INSTALL_PATH);
 
-                var tarArgs =
-                    "--extract --no-same-owner --no-same-permissions";
+                var cpioArgs =
+                    "--extract --make-directories --preserve-modification-time";
 
                 var retryWithRoot = false;
                 try
                 {
                     Directory.CreateDirectory(targetDir);
 
-                    result = await Command.Run("/usr/bin/tar", $"{tarArgs} -f \"{payloadPath}\" -C \"{targetDir}\"",
+                    var result = await Command.Run("/usr/bin/cpio", $"{cpioArgs} \"{targetDir}\" < \"{payloadPath}\"",
                         cancellation: cancellation);
                     if (result.exitCode != 0)
                     {
@@ -603,19 +612,19 @@ namespace sttz.InstallUnity
                 }
                 catch (Exception e)
                 {
-                    _logger.LogInformation($"Tar as user failed, trying as root... ({e.Message})");
+                    _logger.LogInformation($"cpio as user failed, trying as root... ({e.Message})");
                     retryWithRoot = true;
                 }
 
                 if (retryWithRoot)
                 {
-                    result = await Sudo("/bin/mkdir", $"-p \"{targetDir}\"", cancellation);
+                    var result = await Sudo("/bin/mkdir", $"-p \"{targetDir}\"", cancellation);
                     if (result.exitCode != 0)
                     {
                         throw new($"ERROR: {result.error}");
                     }
 
-                    result = await Sudo("/usr/bin/tar", $"{tarArgs} -f \"{payloadPath}\" -C \"{targetDir}\"",
+                    result = await Sudo("/usr/bin/cpio", $"{cpioArgs} \"{targetDir}\" < \"{payloadPath}\"",
                         cancellation);
                     if (result.exitCode != 0)
                     {
