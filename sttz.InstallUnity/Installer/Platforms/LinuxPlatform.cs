@@ -861,30 +861,92 @@ cpio --extract --make-directories --preserve-modification-time --quiet < '{paylo
         {
             if (string.IsNullOrEmpty(destination))
                 throw new($"Cannot install {filePath}: Zip packages must have a destination set.");
+
             var target = destination.Replace("{UNITY_PATH}", INSTALL_PATH);
+
             var retryWithRoot = false;
-            (int exitCode, string output, string error) result;
             try
             {
                 Directory.CreateDirectory(target);
-                result = await Command.Run("/usr/bin/unzip", $"-o -d \"{target}\" \"{filePath}\"",
-                    cancellation: cancellation);
-                if (result.exitCode != 0) throw new($"ERROR: {result.error}");
+
+                // Use native .NET zip extraction
+                await Task.Run(
+                    () => { System.IO.Compression.ZipFile.ExtractToDirectory(filePath, target, overwriteFiles: true); },
+                    cancellation);
+
+                _logger.LogDebug($"Successfully extracted {filePath} to {target}");
+            }
+            catch (UnauthorizedAccessException e)
+            {
+                _logger.LogInformation(
+                    $"Zip extraction as user failed due to permissions, trying as root... ({e.Message})");
+                retryWithRoot = true;
             }
             catch (Exception e)
             {
-                _logger.LogInformation($"Unzip as user failed, trying as root... ({e.Message})");
-                retryWithRoot = true;
+                _logger.LogError($"Failed to extract zip file: {e.Message}");
+                throw;
             }
 
             if (retryWithRoot)
             {
-                result = await Sudo("/bin/mkdir", $"-p \"{target}\"", cancellation);
+                // Create directory with sudo
+                var result = await Sudo("/bin/mkdir", $"-p \"{target}\"", cancellation);
                 if (result.exitCode != 0) throw new($"ERROR: {result.error}");
-                result = await Sudo("/usr/bin/unzip", $"-o -d \"{target}\" \"{filePath}\"", cancellation);
-                if (result.exitCode != 0) throw new($"ERROR: {result.error}");
+
+                // Extract to a temp directory first, then move with sudo
+                var tempExtractPath = Path.Combine(Path.GetTempPath(), UnityInstaller.PRODUCT_NAME,
+                    $"zip_extract_{Path.GetFileNameWithoutExtension(filePath)}_{Guid.NewGuid():N}");
+
+                try
+                {
+                    Directory.CreateDirectory(tempExtractPath);
+
+                    // Extract to temp directory (should work as current user)
+                    await Task.Run(
+                        () =>
+                        {
+                            System.IO.Compression.ZipFile.ExtractToDirectory(filePath, tempExtractPath,
+                                overwriteFiles: true);
+                        }, cancellation);
+
+                    // Move extracted contents to target with sudo
+                    foreach (var item in Directory.GetFileSystemEntries(tempExtractPath))
+                    {
+                        var itemName = Path.GetFileName(item);
+                        var targetPath = Path.Combine(target, itemName);
+
+                        if (Directory.Exists(item))
+                        {
+                            result = await Sudo("/bin/cp", $"-a \"{item}\" \"{targetPath}\"", cancellation);
+                        }
+                        else
+                        {
+                            result = await Sudo("/bin/cp", $"\"{item}\" \"{targetPath}\"", cancellation);
+                        }
+
+                        if (result.exitCode != 0)
+                            throw new($"Failed to copy extracted file to target: {result.error}");
+                    }
+                }
+                finally
+                {
+                    // Clean up temp directory
+                    if (Directory.Exists(tempExtractPath))
+                    {
+                        try
+                        {
+                            Directory.Delete(tempExtractPath, true);
+                        }
+                        catch
+                        {
+                            // Ignore cleanup errors
+                        }
+                    }
+                }
             }
 
+            // Ensure permissions are readable
             await Sudo("/bin/chmod", $"-R o+rX \"{target}\"", cancellation);
         }
 
