@@ -548,13 +548,15 @@ namespace sttz.InstallUnity
         async Task UnpackPkg(string filePath, string destination, CancellationToken cancellation = default)
         {
             // Check if xar is installed
-            if(!File.Exists("/usr/bin/xar") && !File.Exists("/usr/bin/7z"))
+            if (!File.Exists("/usr/bin/xar") && !File.Exists("/usr/bin/7z"))
             {
-                throw new InvalidOperationException("Cannot unpack .pkg files: 'xar' or '7z' not found. Please install 'xar' or '7z' package.");
+                throw new InvalidOperationException(
+                    "Cannot unpack .pkg files: 'xar' or '7z' not found. Please install 'xar' or '7z' package.");
             }
+
             // figure out which tool to use
             var use7Z = File.Exists("/usr/bin/7z") && !File.Exists("/usr/bin/xar");
-            
+
             string tmpDir = null;
             try
             {
@@ -577,33 +579,60 @@ namespace sttz.InstallUnity
                     }
                 }
 
-                var pkgs = Directory.GetDirectories(tmpDir, "*.pkg.tmp");
-                switch (pkgs.Length)
+                // When using 7z, look for Payload files directly instead of .pkg.tmp directories
+                string payloadPath = null;
+                if (use7Z)
                 {
-                    case 0:
-                        throw new($"Could not find any sub-pkg when unpacking pkg '{filePath}'");
-                    case > 1:
-                        throw new(
-                            $"Found multiple sub-pkg when unpacking pkg '{filePath}': {string.Join(", ", pkgs.Select(Path.GetFileName))}");
-                }
+                    // 7z extracts flat structure, look for Payload file directly
+                    var payloadFiles = Directory.GetFiles(tmpDir, "Payload", SearchOption.AllDirectories);
+                    if (payloadFiles.Length == 0)
+                    {
+                        throw new($"Could not find Payload file when unpacking pkg '{filePath}' with 7z");
+                    }
 
-                var payloadPath = Path.Combine(pkgs[0], "Payload");
-                if (!File.Exists(payloadPath))
+                    if (payloadFiles.Length > 1)
+                    {
+                        // Try to find the main one (usually the largest or in a specific pattern)
+                        // For now, just take the first one
+                        _logger.LogWarning($"Found multiple Payload files, using first: {payloadFiles[0]}");
+                    }
+
+                    payloadPath = payloadFiles[0];
+                }
+                else
                 {
-                    throw new($"Could not find 'Payload' when unpacking pkg '{filePath}', expected at '{payloadPath}'");
+                    // xar creates .pkg.tmp directories
+                    var pkgs = Directory.GetDirectories(tmpDir, "*.pkg.tmp");
+                    switch (pkgs.Length)
+                    {
+                        case 0:
+                            throw new($"Could not find any sub-pkg when unpacking pkg '{filePath}'");
+                        case > 1:
+                            throw new(
+                                $"Found multiple sub-pkg when unpacking pkg '{filePath}': {string.Join(", ", pkgs.Select(Path.GetFileName))}");
+                    }
+
+                    payloadPath = Path.Combine(pkgs[0], "Payload");
+                    if (!File.Exists(payloadPath))
+                    {
+                        throw new(
+                            $"Could not find 'Payload' when unpacking pkg '{filePath}', expected at '{payloadPath}'");
+                    }
                 }
 
                 var targetDir = destination.Replace("{UNITY_PATH}", INSTALL_PATH);
 
-                var cpioArgs =
-                    "--extract --make-directories --preserve-modification-time";
+                // Extract the Payload (cpio archive)
+                // Use shell to handle the redirection properly
+                var cpioCommand = $"cpio --extract --make-directories --preserve-modification-time < \"{payloadPath}\"";
 
                 var retryWithRoot = false;
                 try
                 {
                     Directory.CreateDirectory(targetDir);
 
-                    var result = await Command.Run("/usr/bin/cpio", $"{cpioArgs} \"{targetDir}\" < \"{payloadPath}\"",
+                    // Use sh -c to handle the redirection
+                    var result = await Command.Run("/bin/sh", $"-c 'cd \"{targetDir}\" && {cpioCommand}'",
                         cancellation: cancellation);
                     if (result.exitCode != 0)
                     {
@@ -624,8 +653,8 @@ namespace sttz.InstallUnity
                         throw new($"ERROR: {result.error}");
                     }
 
-                    result = await Sudo("/usr/bin/cpio", $"{cpioArgs} \"{targetDir}\" < \"{payloadPath}\"",
-                        cancellation);
+                    // Use sudo sh -c for the entire command including redirection
+                    result = await Sudo("/bin/sh", $"-c 'cd \"{targetDir}\" && {cpioCommand}'", cancellation);
                     if (result.exitCode != 0)
                     {
                         throw new($"ERROR: {result.error}");
