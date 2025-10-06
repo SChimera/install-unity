@@ -244,7 +244,11 @@ namespace sttz.InstallUnity
             // Validate prerequisites
             ValidateInstallPrerequisites(item);
 
-            var extension = Path.GetFileName(item.filePath).ToLowerInvariant();
+            var fileName = Path.GetFileName(item.filePath);
+            if (string.IsNullOrEmpty(fileName))
+                throw new InvalidOperationException("Invalid file path: cannot determine file name");
+            
+            var extension = fileName.ToLowerInvariant();
 
             if (item.package is EditorDownload)
             {
@@ -447,7 +451,7 @@ namespace sttz.InstallUnity
                 throw new FileNotFoundException("Unity executable not found", installationExecutable);
             if (!child)
             {
-                var cmd = new System.Diagnostics.Process();
+                using var cmd = new System.Diagnostics.Process();
                 cmd.StartInfo.FileName = installationExecutable;
                 cmd.StartInfo.Arguments = string.Join(" ", arguments);
                 _logger.LogInformation($"$ {cmd.StartInfo.FileName} {cmd.StartInfo.Arguments}");
@@ -456,19 +460,22 @@ namespace sttz.InstallUnity
             }
             else
             {
-                if (!arguments.Contains("-logFile")) arguments = arguments.Append("-logFile").Append("-");
-                var cmd = new System.Diagnostics.Process();
+                var args = arguments.ToArray();
+                if (!args.Contains("-logFile")) 
+                    args = args.Append("-logFile").Append("-").ToArray();
+                    
+                using var cmd = new System.Diagnostics.Process();
                 cmd.StartInfo.FileName = installationExecutable;
-                cmd.StartInfo.Arguments = string.Join(" ", arguments);
+                cmd.StartInfo.Arguments = string.Join(" ", args);
                 cmd.StartInfo.UseShellExecute = false;
                 cmd.StartInfo.RedirectStandardOutput = true;
                 cmd.StartInfo.RedirectStandardError = true;
                 cmd.EnableRaisingEvents = true;
-                cmd.OutputDataReceived += (s, a) =>
+                cmd.OutputDataReceived += (_, a) =>
                 {
                     if (a.Data != null) _logger.LogInformation(a.Data);
                 };
-                cmd.ErrorDataReceived += (s, a) =>
+                cmd.ErrorDataReceived += (_, a) =>
                 {
                     if (a.Data != null) _logger.LogError(a.Data);
                 };
@@ -500,7 +507,7 @@ namespace sttz.InstallUnity
             if (!string.IsNullOrEmpty(installationPaths))
             {
                 const StringComparison comparison = StringComparison.OrdinalIgnoreCase;
-                var paths = installationPaths.Split(new char[] { ';' }, StringSplitOptions.RemoveEmptyEntries);
+                var paths = installationPaths.Split(';', StringSplitOptions.RemoveEmptyEntries);
                 foreach (var path in paths)
                 {
                     expanded = path.Trim();
@@ -576,7 +583,7 @@ namespace sttz.InstallUnity
                         cancellation: cancellation);
                     if (result.exitCode != 0)
                     {
-                        throw new($"ERROR: {result.error}");
+                        throw new Exception($"ERROR: {result.error}");
                     }
                 }
 
@@ -630,36 +637,33 @@ namespace sttz.InstallUnity
 
                     // Use cpio directly with stdin redirection instead of shell
                     // This avoids shell quoting issues
-                    var cpioProcess = new System.Diagnostics.Process
+                    using (var cpioProcess = new System.Diagnostics.Process())
                     {
-                        StartInfo = new()
+                        cpioProcess.StartInfo.FileName = "/usr/bin/cpio";
+                        cpioProcess.StartInfo.Arguments = "--extract --make-directories --preserve-modification-time --quiet";
+                        cpioProcess.StartInfo.WorkingDirectory = targetDir;
+                        cpioProcess.StartInfo.RedirectStandardInput = true;
+                        cpioProcess.StartInfo.RedirectStandardOutput = true;
+                        cpioProcess.StartInfo.RedirectStandardError = true;
+                        cpioProcess.StartInfo.UseShellExecute = false;
+
+                        cpioProcess.Start();
+
+                        // Feed the payload file to cpio's stdin
+                        using (var payloadStream = File.OpenRead(payloadPath))
                         {
-                            FileName = "/usr/bin/cpio",
-                            Arguments = "--extract --make-directories --preserve-modification-time --quiet",
-                            WorkingDirectory = targetDir,
-                            RedirectStandardInput = true,
-                            RedirectStandardOutput = true,
-                            RedirectStandardError = true,
-                            UseShellExecute = false,
-                        },
-                    };
+                            await payloadStream.CopyToAsync(cpioProcess.StandardInput.BaseStream, cancellation);
+                        }
 
-                    cpioProcess.Start();
+                        cpioProcess.StandardInput.Close();
 
-                    // Feed the payload file to cpio's stdin
-                    using (var payloadStream = File.OpenRead(payloadPath))
-                    {
-                        await payloadStream.CopyToAsync(cpioProcess.StandardInput.BaseStream, cancellation);
-                    }
+                        await cpioProcess.WaitForExitAsync(cancellation);
 
-                    cpioProcess.StandardInput.Close();
-
-                    await cpioProcess.WaitForExitAsync(cancellation);
-
-                    if (cpioProcess.ExitCode != 0)
-                    {
-                        var error = await cpioProcess.StandardError.ReadToEndAsync();
-                        throw new($"cpio extraction failed: {error}");
+                        if (cpioProcess.ExitCode != 0)
+                        {
+                            var error = await cpioProcess.StandardError.ReadToEndAsync();
+                            throw new($"cpio extraction failed: {error}");
+                        }
                     }
                 }
                 catch (Exception e)
@@ -853,6 +857,7 @@ cpio --extract --make-directories --preserve-modification-time --quiet < '{paylo
             if (string.IsNullOrEmpty(destination))
                 throw new($"Cannot install {filePath}: File packages must have a destination set.");
             var targetDir = destination.Replace("{UNITY_PATH}", INSTALL_PATH);
+            Directory.CreateDirectory(targetDir);
             var dst = Path.Combine(targetDir, Path.GetFileName(filePath));
             await Copy(filePath, dst, cancellation);
         }
@@ -984,7 +989,7 @@ cpio --extract --make-directories --preserve-modification-time --quiet < '{paylo
             if (sourcePath.StartsWith(newPath + "/"))
             {
                 var tmpSource = Path.Combine(Path.GetTempPath(), UnityInstaller.PRODUCT_NAME,
-                    Path.GetFileName(newPath));
+                    Path.GetFileName(newPath) ?? "temp");
                 await Move(sourcePath, tmpSource, cancellation);
                 await Delete(newPath, cancellation);
                 sourcePath = tmpSource;
