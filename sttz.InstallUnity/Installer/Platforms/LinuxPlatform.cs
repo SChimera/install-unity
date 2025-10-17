@@ -131,7 +131,7 @@ namespace sttz.InstallUnity
             return false;
         }
 
-        public Task<IEnumerable<Installation>> FindInstallations(CancellationToken cancellation = default)
+        public async Task<IEnumerable<Installation>> FindInstallations(CancellationToken cancellation = default)
         {
             var installations = new List<Installation>();
             var roots = new[]
@@ -157,19 +157,27 @@ namespace sttz.InstallUnity
                 {
                     var editorExe = Path.Combine(dir, "Editor", "Unity");
                     if (!File.Exists(editorExe)) continue;
-                    var versionTxt = Path.Combine(dir, "Editor", "Data", "UnityVersion.txt");
+
+                    // Get version by calling Unity with -version flag
                     UnityVersion version = default;
-                    if (File.Exists(versionTxt))
+                    try
                     {
-                        try
+                        var result = await Command.Run(editorExe, "-version", null, cancellation);
+                        if (result.exitCode == 0 && !string.IsNullOrWhiteSpace(result.output))
                         {
-                            var line = File.ReadLines(versionTxt).FirstOrDefault()?.Trim();
-                            if (!string.IsNullOrEmpty(line)) version = new UnityVersion(line);
+                            // Unity -version output format is typically just the version string
+                            var versionLine = result.output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                                .FirstOrDefault()?.Trim();
+                            
+                            if (!string.IsNullOrEmpty(versionLine))
+                            {
+                                version = new UnityVersion(versionLine);
+                            }
                         }
-                        catch (Exception e)
-                        {
-                            _logger.LogWarning($"Failed reading version at '{dir}': {e.Message}");
-                        }
+                    }
+                    catch (Exception e)
+                    {
+                        _logger.LogWarning($"Failed to get version from Unity executable at '{editorExe}': {e.Message}");
                     }
 
                     if (!version.IsFullVersion)
@@ -183,7 +191,7 @@ namespace sttz.InstallUnity
                 }
             }
 
-            return Task.FromResult<IEnumerable<Installation>>(installations);
+            return installations;
         }
 
         public async Task PrepareInstall(UnityInstaller.Queue queue, string installationPaths,
@@ -519,10 +527,20 @@ namespace sttz.InstallUnity
                     expanded = Helpers.Replace(expanded, "{hash}", version.hash, comparison);
                     if (!Directory.Exists(expanded)) return expanded;
                 }
+                
+                // All configured paths exist, use the last one with unique suffix
+                if (expanded != null) return Helpers.GenerateUniqueFileName(expanded);
             }
-
-            if (expanded != null) return Helpers.GenerateUniqueFileName(expanded);
-            return Helpers.GenerateUniqueFileName(INSTALL_PATH);
+            
+            // No custom path provided (fallback), use default full versioned pattern
+            // This ensures every installation gets a unique directory by default
+            // Format: /opt/Unity {major}.{minor}.{patch}{type}{build}
+            // e.g., /opt/Unity 6000.0.59f2 or /opt/Unity 2023.2.1f1
+            expanded = Path.Combine(INSTALL_DIRECTORY, 
+                $"Unity {version.major}.{version.minor}.{version.patch}{(char)version.type}{version.build}");
+            if (!Directory.Exists(expanded)) return expanded;
+            
+            return Helpers.GenerateUniqueFileName(expanded);
         }
 
         async Task InstallTar(string filePath, string destination, bool stripToUnityRoot,
