@@ -332,7 +332,7 @@ namespace sttz.InstallUnity
         private async Task InstallModuleTar(string filePath, Module module, CancellationToken cancellation)
         {
             var dest = GetModuleDestination(module.destination);
-            await InstallTar(filePath, dest, stripToUnityRoot: false, cancellation);
+            await InstallTar(filePath, dest, stripToUnityRoot: true, cancellation);
         }
 
         private async Task InstallModuleZip(string filePath, Module module, CancellationToken cancellation)
