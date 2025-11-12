@@ -332,7 +332,7 @@ namespace sttz.InstallUnity
         private async Task InstallModuleTar(string filePath, Module module, CancellationToken cancellation)
         {
             var dest = GetModuleDestination(module.destination);
-            await InstallTar(filePath, dest, stripToUnityRoot: true, cancellation);
+            await InstallTar(filePath, dest, stripToUnityRoot: false, cancellation);
         }
 
         private async Task InstallModuleZip(string filePath, Module module, CancellationToken cancellation)
@@ -758,34 +758,70 @@ cpio --extract --make-directories --preserve-modification-time --quiet < '{paylo
 
             if (!stripToUnityRoot)
             {
-                // Simple case: extract directly to target
-                var (exitCode, _, error) =
-                    await cmd("/bin/tar", $"-xf \"{filePath}\" -C \"{targetDir}\"", cancellation);
-                if (exitCode != 0) throw new Exception($"Failed to extract tar archive: {error}");
+                // For modules: extract to temp first to handle potential redundant paths
+                string tempRoot = null;
+                try
+                {
+                    tempRoot = Path.Combine(Path.GetTempPath(), UnityInstaller.PRODUCT_NAME,
+                        GetBaseNameWithoutTarExtension(filePath));
+
+                    // Clean up any previous failed extraction
+                    if (Directory.Exists(tempRoot))
+                    {
+                        await Delete(tempRoot, cancellation);
+                    }
+
+                    Directory.CreateDirectory(tempRoot);
+
+                    // Extract to temporary location
+                    var (exitCode, _, error) = await cmd("/bin/tar", $"-xf \"{filePath}\" -C \"{tempRoot}\"", cancellation);
+                    if (exitCode != 0) throw new Exception($"Failed to extract tar archive to temp directory: {error}");
+
+                    // Find the deepest common path that matches the target directory structure
+                    var extractedRoot = FindModuleRoot(tempRoot, targetDir);
+                    
+                    // Move contents from extracted root to target directory
+                    await MoveDirectoryContents(extractedRoot, targetDir, cancellation);
+                }
+                finally
+                {
+                    // Always clean up temp directory
+                    if (tempRoot != null && Directory.Exists(tempRoot))
+                    {
+                        try
+                        {
+                            await Delete(tempRoot, cancellation);
+                        }
+                        catch (Exception e)
+                        {
+                            _logger.LogWarning($"Failed to clean up temporary directory '{tempRoot}': {e.Message}");
+                        }
+                    }
+                }
                 return;
             }
 
             // Complex case: extract to temp, find Unity root, then move contents
-            string tempRoot = null;
+            string editorTempRoot = null;
             try
             {
-                tempRoot = Path.Combine(Path.GetTempPath(), UnityInstaller.PRODUCT_NAME,
+                editorTempRoot = Path.Combine(Path.GetTempPath(), UnityInstaller.PRODUCT_NAME,
                     GetBaseNameWithoutTarExtension(filePath));
 
                 // Clean up any previous failed extraction
-                if (Directory.Exists(tempRoot))
+                if (Directory.Exists(editorTempRoot))
                 {
-                    await Delete(tempRoot, cancellation);
+                    await Delete(editorTempRoot, cancellation);
                 }
 
-                Directory.CreateDirectory(tempRoot);
+                Directory.CreateDirectory(editorTempRoot);
 
                 // Extract to temporary location
-                var (exitCode, _, error) = await cmd("/bin/tar", $"-xf \"{filePath}\" -C \"{tempRoot}\"", cancellation);
+                var (exitCode, _, error) = await cmd("/bin/tar", $"-xf \"{filePath}\" -C \"{editorTempRoot}\"", cancellation);
                 if (exitCode != 0) throw new($"Failed to extract tar archive to temp directory: {error}");
 
                 // Find Unity root directory
-                var sourceRoot = FindUnityRoot(tempRoot);
+                var sourceRoot = FindUnityRoot(editorTempRoot);
                 if (sourceRoot == null)
                 {
                     throw new($"Failed to locate Unity Editor in extracted archive '{filePath}'");
@@ -797,17 +833,76 @@ cpio --extract --make-directories --preserve-modification-time --quiet < '{paylo
             finally
             {
                 // Always clean up temp directory
-                if (tempRoot != null && Directory.Exists(tempRoot))
+                if (editorTempRoot != null && Directory.Exists(editorTempRoot))
                 {
                     try
                     {
-                        await Delete(tempRoot, cancellation);
+                        await Delete(editorTempRoot, cancellation);
                     }
                     catch (Exception e)
                     {
-                        _logger.LogWarning($"Failed to clean up temporary directory '{tempRoot}': {e.Message}");
+                        _logger.LogWarning($"Failed to clean up temporary directory '{editorTempRoot}': {e.Message}");
                     }
                 }
+            }
+        }
+
+        private string FindModuleRoot(string tempRoot, string targetDir)
+        {
+            // The target directory path often contains path components that are also in the archive
+            // For example: targetDir = /opt/Unity/Editor/Data/PlaybackEngines/WebGLSupport
+            // Archive might contain: Editor/Data/PlaybackEngines/WebGLSupport/BuildTools/...
+            // We need to find the deepest directory in tempRoot that when extracted, would correctly
+            // align with targetDir without creating duplicate paths.
+
+            // Strategy: Walk through the extracted temp directory and find the deepest path
+            // that contains the actual content files (not just nested empty Editor/Data/... structure)
+            
+            _logger.LogDebug($"Finding module root in '{tempRoot}' for target '{targetDir}'");
+            
+            // If the temp root is empty or doesn't exist, something went wrong
+            if (!Directory.Exists(tempRoot))
+            {
+                throw new Exception($"Temp extraction root doesn't exist: {tempRoot}");
+            }
+
+            // Check if content is directly at the root (files or multiple directories)
+            var rootEntries = Directory.GetFileSystemEntries(tempRoot);
+            if (rootEntries.Length == 0)
+            {
+                throw new Exception($"Extracted archive is empty: {tempRoot}");
+            }
+
+            // If there are files at the root or multiple directories, extract from here
+            if (Directory.GetFiles(tempRoot).Length > 0 || Directory.GetDirectories(tempRoot).Length > 1)
+            {
+                _logger.LogDebug($"Module content found at root: {tempRoot}");
+                return tempRoot;
+            }
+
+            // Single directory at root - this is often a wrapper, keep drilling down
+            string currentPath = tempRoot;
+            while (true)
+            {
+                var entries = Directory.GetFileSystemEntries(currentPath);
+                
+                // If we find files or multiple directories, this is the content root
+                if (Directory.GetFiles(currentPath).Length > 0 || Directory.GetDirectories(currentPath).Length > 1)
+                {
+                    _logger.LogDebug($"Module content found at: {currentPath}");
+                    return currentPath;
+                }
+
+                // Single directory - might be a redundant path component, keep going
+                if (entries.Length == 1 && Directory.Exists(entries[0]))
+                {
+                    currentPath = entries[0];
+                    continue;
+                }
+
+                // Empty directory or unexpected structure - use current path
+                _logger.LogDebug($"Module extraction stopped at: {currentPath}");
+                return currentPath;
             }
         }
 
